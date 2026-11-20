@@ -12486,9 +12486,6 @@
           "thinking": {
             "label": "Thinking"
           },
-          "thinkingEllipsis": {
-            "label": "Thinking..."
-          },
           "updatingMemory": {
             "label": "Updating memory..."
           },
