@@ -550,8 +550,9 @@ const AgentMessage = React.memo(function AgentMessage({
   let nextAnswerRef = 0;
 
   return (
-    // One cursor for the whole turn, across its sections.
-    <ResponseCursorScope>
+    // One cursor for the whole turn, across its sections. It stays until the
+    // answer has finished.
+    <ResponseCursorScope working={!isComplete}>
       <div
         className="flex flex-col gap-3"
         data-testid={isComplete ? "onyx-ai-message" : undefined}

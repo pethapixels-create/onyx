@@ -486,6 +486,7 @@ export default function BuildMessageList({
               aria-busy={isStreaming}
             >
               <Response
+                working={isStreaming}
                 items={[
                   ...(streamRender?.items ?? []),
                   ...(showStreamCursor ? [responseCursorItem()] : []),

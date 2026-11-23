@@ -51,6 +51,8 @@ export interface ResponseItem {
 
 export interface ResponseProps {
   items: ResponseItem[];
+  /** The response still works; see `ResponseCursorScope`. */
+  working?: boolean;
 }
 
 /**
@@ -58,13 +60,21 @@ export interface ResponseProps {
  * `RESPONSE_CURSOR_ANCHOR_ATTRIBUTE`). The cursor is a single element, so it
  * never restarts its pulse. Text pushes it along at once; a move between a
  * waiting slot and text, or back after it was hidden, glides. It follows its
- * marker each frame while one exists, and fades out, in place, when none
- * does.
+ * marker each frame while one exists. With no marker, it holds its place
+ * while the turn works (e.g. between text that ended and the next tool call),
+ * and fades out, in place, once the turn has finished.
  */
 function useTurnCursor(
   rootRef: React.RefObject<HTMLDivElement | null>,
-  cursorRef: React.RefObject<HTMLSpanElement | null>
+  cursorRef: React.RefObject<HTMLSpanElement | null>,
+  working: boolean
 ): void {
+  // Read each frame, so a change does not restart the placement loop.
+  const workingRef = useRef(working);
+  useEffect(() => {
+    workingRef.current = working;
+  }, [working]);
+
   useEffect(() => {
     const root = rootRef.current;
     const cursor = cursorRef.current;
@@ -83,6 +93,11 @@ function useTurnCursor(
       );
       const anchor = anchors.item(anchors.length - 1);
       if (!anchor) {
+        if (workingRef.current && placed) {
+          // Hold where it is until the next marker arrives or the turn ends.
+          frame = requestAnimationFrame(place);
+          return;
+        }
         cursor.style.opacity = "0";
         visible = false;
         return;
@@ -121,6 +136,11 @@ function useTurnCursor(
 }
 
 interface ResponseCursorScopeProps {
+  /**
+   * The turn still works. The cursor stays visible until it has finished,
+   * also while no block holds it.
+   */
+  working?: boolean;
   children: React.ReactNode;
 }
 
@@ -129,11 +149,14 @@ interface ResponseCursorScopeProps {
  * span several responses. A `Response` opens its own scope unless one is
  * already open around it.
  */
-export function ResponseCursorScope({ children }: ResponseCursorScopeProps) {
+export function ResponseCursorScope({
+  working = false,
+  children,
+}: ResponseCursorScopeProps) {
   const inScope = useContext(InCursorScopeContext);
   const rootRef = useRef<HTMLDivElement>(null);
   const cursorRef = useRef<HTMLSpanElement>(null);
-  useTurnCursor(rootRef, cursorRef);
+  useTurnCursor(rootRef, cursorRef, working);
 
   if (inScope) return <>{children}</>;
   return (
@@ -166,7 +189,7 @@ export function ResponseCursorScope({ children }: ResponseCursorScopeProps) {
  * Text that takes the cursor item's place appears at once too: the cursor
  * moves into it.
  */
-export function Response({ items }: ResponseProps) {
+export function Response({ items, working = false }: ResponseProps) {
   const [initialKeys] = useState(() => new Set(items.map((item) => item.key)));
   // The keys of the previous render, to see text replace the cursor item.
   const [previousKeys, setPreviousKeys] = useState(() =>
@@ -184,7 +207,7 @@ export function Response({ items }: ResponseProps) {
     !keys.includes(RESPONSE_CURSOR_KEY);
 
   return (
-    <ResponseCursorScope>
+    <ResponseCursorScope working={working}>
       <Section alignItems="stretch" gap={3} height="auto">
         {items.map((item) =>
           item.kind === "run" ? (
