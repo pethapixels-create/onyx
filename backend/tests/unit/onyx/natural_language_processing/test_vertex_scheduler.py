@@ -357,34 +357,25 @@ def test_transient_errors_are_not_resent_past_a_rate_limiter() -> None:
     assert calls == 1
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        TimeoutError(),
-        _vertex_503(),
-        genai_errors.ClientError(400, {"error": {"code": 400, "message": "bad"}}),
-    ],
-)
-def test_embed_does_not_resend_the_call_after_a_final_error(error: Exception) -> None:
-    client = MagicMock()
-    client.aio.models.embed_content = AsyncMock(side_effect=error)
-    client.aio.aclose = AsyncMock()
-    auth = _cloud_embedding().auth
-    embedding = CloudEmbedding(
+def _passage_embedding(retry_tries: int) -> CloudEmbedding:
+    return CloudEmbedding(
         api_key=None,
         provider=EmbeddingProvider.GOOGLE,
-        auth=auth,
+        auth=_cloud_embedding().auth,
         policy=EmbeddingRequestPolicy(
             retry_backoff=EmbeddingRetryBackoff(scale_seconds=0, max_seconds=0),
-            retry_tries=3,
+            retry_tries=retry_tries,
             block_on_provider_rate_limit=True,
         ),
     )
+
+
+def _embed_passage(embedding: CloudEmbedding, client: MagicMock) -> None:
+    client.aio.aclose = AsyncMock()
     with (
         patch("google.auth.default", return_value=(MagicMock(spec=Credentials), "p")),
         patch("google.genai.Client", return_value=client),
         patch.object(vertex_scheduler.asyncio, "sleep", AsyncMock()),
-        pytest.raises(EmbeddingRequestFailedError),
     ):
         asyncio.run(
             embedding.embed(
@@ -393,8 +384,33 @@ def test_embed_does_not_resend_the_call_after_a_final_error(error: Exception) ->
                 model_name="gemini-embedding-2",
             )
         )
-    sends_in_slot = 3 if isinstance(error, genai_errors.ServerError) else 1
-    assert client.aio.models.embed_content.await_count == sends_in_slot
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError(),
+        genai_errors.ClientError(400, {"error": {"code": 400, "message": "bad"}}),
+    ],
+)
+def test_embed_does_not_resend_the_call_after_a_final_error(error: Exception) -> None:
+    client = MagicMock()
+    client.aio.models.embed_content = AsyncMock(side_effect=error)
+    with pytest.raises(EmbeddingRequestFailedError):
+        _embed_passage(_passage_embedding(retry_tries=3), client)
+    assert client.aio.models.embed_content.await_count == 1
+
+
+def test_embed_resends_the_call_after_a_longer_outage() -> None:
+    response = MagicMock()
+    response.embeddings = [MagicMock(values=[0.1])]
+    client = MagicMock()
+    # The scheduler sends three times, then the outer retry sends again.
+    client.aio.models.embed_content = AsyncMock(
+        side_effect=[_vertex_503(), _vertex_503(), _vertex_503(), response]
+    )
+    _embed_passage(_passage_embedding(retry_tries=2), client)
+    assert client.aio.models.embed_content.await_count == 4
 
 
 def test_embeddings_keep_the_input_order() -> None:
