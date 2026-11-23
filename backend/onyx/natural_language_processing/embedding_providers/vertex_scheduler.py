@@ -145,11 +145,12 @@ class VertexRequestScheduler:
         policy: EmbeddingRequestPolicy,
     ) -> _T:
         limit = self.model_limit(project_location_model)
-        # Outside the policy, so its wait limit does not count the slot wait.
-        async with self._slot(limit, policy.should_stop):
-            return await policy.send_async(
-                partial(self._send_in_slot, request, limit, policy)
-            )
+        # The policy waits for its rate limit and throttling outside the slot,
+        # so the wait does not hold capacity that other projects could use.
+        return await policy.send_async(
+            partial(self._send_in_slot, request, limit, policy),
+            slot=partial(self._slot, limit, policy.should_stop),
+        )
 
     @asynccontextmanager
     async def _slot(

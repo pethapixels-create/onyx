@@ -1,5 +1,6 @@
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -33,6 +34,8 @@ from onyx.natural_language_processing.vertex_auth import VertexEmbeddingConfig
 from shared_configs.enums import EmbeddingProvider, EmbedTextType
 
 _KEY = "p/global/gemini-embedding-2"
+_POLICY_MODULE = "onyx.natural_language_processing.embedding_request_policy"
+_WAIT_MODULE = "onyx.natural_language_processing.embedding_rate_limit"
 
 
 def _vertex_503() -> genai_errors.ServerError:
@@ -187,6 +190,67 @@ def test_rate_limited_request_backs_off_inside_its_slot() -> None:
         asyncio.run(scheduler.send(_KEY, request, _policy()))
     assert in_flight_during_backoff == [1]
     assert scheduler.process_limit.in_flight == 0
+
+
+def test_rate_limit_waits_hold_no_slot() -> None:
+    scheduler = _scheduler_without_backoff(rate_limit_retry_budget_seconds=0)
+    in_flight_while_waiting: list[int] = []
+    calls = 0
+
+    async def wait_for_rate_limit(*_args: object) -> None:
+        in_flight_while_waiting.append(scheduler.process_limit.in_flight)
+
+    def throttle_sleeps(*_args: object) -> Iterator[float]:
+        in_flight_while_waiting.append(scheduler.process_limit.in_flight)
+        yield 0
+
+    async def request() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _vertex_429()
+        return "ok"
+
+    rate_limiter = MagicMock(spec=EmbeddingRateLimiter)
+    rate_limiter.acquire_async = AsyncMock(side_effect=wait_for_rate_limit)
+    policy = EmbeddingRequestPolicy(
+        retry_backoff=EmbeddingRetryBackoff(scale_seconds=0, max_seconds=0),
+        retry_tries=1,
+        rate_limiter=rate_limiter,
+        block_on_provider_rate_limit=True,
+    )
+    with patch(f"{_POLICY_MODULE}.wait_sleeps", throttle_sleeps):
+        assert asyncio.run(scheduler.send(_KEY, request, policy)) == "ok"
+    # Rate limit, provider throttling, then the rate limit again.
+    assert in_flight_while_waiting == [0, 0, 0]
+
+
+def test_slot_wait_does_not_count_against_the_wait_limit() -> None:
+    clock = MagicMock()
+    clock.monotonic.return_value = 0.0
+
+    @asynccontextmanager
+    async def slow_slot() -> AsyncIterator[None]:
+        clock.monotonic.return_value += 100.0
+        yield
+
+    calls = 0
+
+    async def request() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _vertex_429()
+        return "ok"
+
+    with (
+        patch(f"{_POLICY_MODULE}.time", clock),
+        patch(f"{_WAIT_MODULE}.time", clock),
+        patch(f"{_WAIT_MODULE}._MAX_TOTAL_WAIT_SECONDS", 60.0),
+        patch(f"{_WAIT_MODULE}._retry_wait_seconds", return_value=0),
+    ):
+        assert asyncio.run(_policy().send_async(request, slot=slow_slot)) == "ok"
+    assert calls == 2
 
 
 def test_waiting_for_a_slot_sees_a_stop_signal() -> None:

@@ -1,6 +1,7 @@
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Iterator
+from contextlib import AbstractAsyncContextManager
 from typing import TypeVar
 
 from pydantic import BaseModel, ConfigDict
@@ -74,9 +75,15 @@ class EmbeddingRequestPolicy(BaseModel):
                     self._add_provider_throttle_wait(time.monotonic() - start)
                 throttle_attempt += 1
 
-    async def send_async(self, request: Callable[[], Awaitable[_T]]) -> _T:
+    async def send_async(
+        self,
+        request: Callable[[], Awaitable[_T]],
+        slot: Callable[[], AbstractAsyncContextManager[object]] | None = None,
+    ) -> _T:
         """Sends one provider request under this policy. The rate limit and
-        provider throttling share one wait time limit per request."""
+        provider throttling share one wait time limit per request. Each
+        attempt runs inside `slot`, entered after the rate limit; the wait
+        for the slot does not count against the limit."""
         started_at = time.monotonic()
         throttle_attempt = 0
         while True:
@@ -85,7 +92,12 @@ class EmbeddingRequestPolicy(BaseModel):
                     self.should_stop, started_at, self._add_rate_limit_wait
                 )
             try:
-                return await request()
+                if slot is None:
+                    return await request()
+                slot_wait_started = time.monotonic()
+                async with slot():
+                    started_at += time.monotonic() - slot_wait_started
+                    return await request()
             except Exception as e:
                 if not (self.block_on_provider_rate_limit and is_rate_limit_error(e)):
                     raise
