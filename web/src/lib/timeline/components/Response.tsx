@@ -66,15 +66,8 @@ export interface ResponseProps {
  */
 function useTurnCursor(
   rootRef: React.RefObject<HTMLDivElement | null>,
-  cursorRef: React.RefObject<HTMLSpanElement | null>,
-  working: boolean
+  cursorRef: React.RefObject<HTMLSpanElement | null>
 ): void {
-  // Read each frame, so a change does not restart the placement loop.
-  const workingRef = useRef(working);
-  useEffect(() => {
-    workingRef.current = working;
-  }, [working]);
-
   useEffect(() => {
     const root = rootRef.current;
     const cursor = cursorRef.current;
@@ -93,7 +86,8 @@ function useTurnCursor(
       );
       const anchor = anchors.item(anchors.length - 1);
       if (!anchor) {
-        if (workingRef.current && placed) {
+        // The root's `data-working` says the turn still works.
+        if (placed && root.hasAttribute("data-working")) {
           // Hold where it is until the next marker arrives or the turn ends.
           frame = requestAnimationFrame(place);
           return;
@@ -156,12 +150,16 @@ export function ResponseCursorScope({
   const inScope = useContext(InCursorScopeContext);
   const rootRef = useRef<HTMLDivElement>(null);
   const cursorRef = useRef<HTMLSpanElement>(null);
-  useTurnCursor(rootRef, cursorRef, working);
+  useTurnCursor(rootRef, cursorRef);
 
   if (inScope) return <>{children}</>;
   return (
     <InCursorScopeContext.Provider value>
-      <div ref={rootRef} className="relative">
+      <div
+        ref={rootRef}
+        className="relative"
+        data-working={working || undefined}
+      >
         {children}
         {/* The outer element places and fades the cursor; the inner one
             pulses. A pulse animates opacity, which would override the fade. */}
