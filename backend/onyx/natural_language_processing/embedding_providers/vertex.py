@@ -15,6 +15,8 @@ from onyx.natural_language_processing.embedding_providers.vertex_credentials imp
 )
 from onyx.natural_language_processing.embedding_providers.vertex_scheduler import (
     VERTEX_SCHEDULER,
+    is_transient_vertex_error,
+    resends_in_slot,
 )
 from onyx.natural_language_processing.embedding_rate_limit import (
     EmbeddingWaitTimeoutError,
@@ -22,6 +24,7 @@ from onyx.natural_language_processing.embedding_rate_limit import (
 from onyx.natural_language_processing.embedding_request_policy import (
     EmbeddingRequestPolicy,
 )
+from onyx.natural_language_processing.exceptions import EmbeddingRequestFailedError
 from onyx.utils.logger import setup_logger
 from shared_configs.configs import VERTEXAI_EMBEDDING_LOCAL_BATCH_SIZE
 from shared_configs.model_server_models import Embedding
@@ -101,8 +104,26 @@ async def embed_with_vertex(
             "VertexAI embedding completed: %s embeddings generated", len(embeddings)
         )
         return embeddings
+    except Exception as e:
+        if _resending_does_not_help(e, policy, scheduled=scheduler_key is not None):
+            raise EmbeddingRequestFailedError(f"{type(e).__name__}: {e}") from e
+        raise
     finally:
         await _close(client)
+
+
+def _resending_does_not_help(
+    error: Exception, policy: EmbeddingRequestPolicy, scheduled: bool
+) -> bool:
+    # CloudEmbedding.embed resends a failed call with all of its inputs,
+    # including the ones that succeeded. It does not resend this error type.
+    from google.genai import errors as genai_errors
+
+    if isinstance(error, TimeoutError):
+        return True
+    if isinstance(error, genai_errors.ClientError):
+        return error.code not in (401, 403, 429)
+    return scheduled and resends_in_slot(policy) and is_transient_vertex_error(error)
 
 
 async def _embed_in_parallel(

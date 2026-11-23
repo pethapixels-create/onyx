@@ -20,17 +20,25 @@ from onyx.natural_language_processing.embedding_providers.vertex_scheduler impor
     is_transient_vertex_error,
 )
 from onyx.natural_language_processing.embedding_rate_limit import (
+    EmbeddingRateLimiter,
     EmbeddingWaitTimeoutError,
 )
 from onyx.natural_language_processing.embedding_request_policy import (
     EmbeddingRequestPolicy,
     EmbeddingRetryBackoff,
 )
+from onyx.natural_language_processing.exceptions import EmbeddingRequestFailedError
 from onyx.natural_language_processing.search_nlp_models import CloudEmbedding
 from onyx.natural_language_processing.vertex_auth import VertexEmbeddingConfig
-from shared_configs.enums import EmbeddingProvider
+from shared_configs.enums import EmbeddingProvider, EmbedTextType
 
 _KEY = "p/global/gemini-embedding-2"
+
+
+def _vertex_503() -> genai_errors.ServerError:
+    return genai_errors.ServerError(
+        503, {"error": {"code": 503, "status": "UNAVAILABLE"}}
+    )
 
 
 def _vertex_429() -> genai_errors.ClientError:
@@ -325,6 +333,68 @@ def test_an_error_that_ends_the_call_wins(ends_the_call: Exception) -> None:
     errors = [RuntimeError("sibling"), ends_the_call]
     assert _error_to_raise(errors) is ends_the_call
     assert _error_to_raise([errors[0]]) is errors[0]
+
+
+def test_transient_errors_are_not_resent_past_a_rate_limiter() -> None:
+    scheduler = _scheduler_without_backoff()
+    calls = 0
+
+    async def request() -> str:
+        nonlocal calls
+        calls += 1
+        raise _vertex_503()
+
+    rate_limiter = MagicMock(spec=EmbeddingRateLimiter)
+    rate_limiter.acquire_async = AsyncMock()
+    policy = EmbeddingRequestPolicy(
+        retry_backoff=EmbeddingRetryBackoff(scale_seconds=0, max_seconds=0),
+        retry_tries=1,
+        rate_limiter=rate_limiter,
+        block_on_provider_rate_limit=True,
+    )
+    with pytest.raises(genai_errors.ServerError):
+        asyncio.run(scheduler.send(_KEY, request, policy))
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError(),
+        _vertex_503(),
+        genai_errors.ClientError(400, {"error": {"code": 400, "message": "bad"}}),
+    ],
+)
+def test_embed_does_not_resend_the_call_after_a_final_error(error: Exception) -> None:
+    client = MagicMock()
+    client.aio.models.embed_content = AsyncMock(side_effect=error)
+    client.aio.aclose = AsyncMock()
+    auth = _cloud_embedding().auth
+    embedding = CloudEmbedding(
+        api_key=None,
+        provider=EmbeddingProvider.GOOGLE,
+        auth=auth,
+        policy=EmbeddingRequestPolicy(
+            retry_backoff=EmbeddingRetryBackoff(scale_seconds=0, max_seconds=0),
+            retry_tries=3,
+            block_on_provider_rate_limit=True,
+        ),
+    )
+    with (
+        patch("google.auth.default", return_value=(MagicMock(spec=Credentials), "p")),
+        patch("google.genai.Client", return_value=client),
+        patch.object(vertex_scheduler.asyncio, "sleep", AsyncMock()),
+        pytest.raises(EmbeddingRequestFailedError),
+    ):
+        asyncio.run(
+            embedding.embed(
+                texts=["a"],
+                text_type=EmbedTextType.PASSAGE,
+                model_name="gemini-embedding-2",
+            )
+        )
+    sends_in_slot = 3 if isinstance(error, genai_errors.ServerError) else 1
+    assert client.aio.models.embed_content.await_count == sends_in_slot
 
 
 def test_embeddings_keep_the_input_order() -> None:

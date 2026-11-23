@@ -56,6 +56,12 @@ def is_transient_vertex_error(error: BaseException) -> bool:
     )
 
 
+def resends_in_slot(policy: EmbeddingRequestPolicy) -> bool:
+    # Only indexing resends, and a configured rate limiter must see every
+    # request.
+    return policy.block_on_provider_rate_limit and policy.rate_limiter is None
+
+
 class _SlotRetries:
     """Resends happen inside the slot: a free slot would go to a new request
     that the provider refuses too."""
@@ -65,9 +71,7 @@ class _SlotRetries:
     ) -> None:
         self._settings = settings
         self._policy = policy
-        self._indexing = policy.block_on_provider_rate_limit
-        # A configured rate limiter must see every request.
-        self._retries_rate_limits = self._indexing and policy.rate_limiter is None
+        self._resends = resends_in_slot(policy)
         self._rate_limit_deadline = (
             time.monotonic() + settings.rate_limit_retry_budget_seconds
         )
@@ -80,15 +84,12 @@ class _SlotRetries:
         if is_rate_limit_error(error):
             limit.record_rate_limit()
             return self._rate_limit_wait()
-        if self._indexing and is_transient_vertex_error(error):
+        if self._resends and is_transient_vertex_error(error):
             return self._transient_error_wait()
         return None
 
     def _rate_limit_wait(self) -> float | None:
-        if (
-            not self._retries_rate_limits
-            or time.monotonic() >= self._rate_limit_deadline
-        ):
+        if not self._resends or time.monotonic() >= self._rate_limit_deadline:
             return None
         wait = self._settings.backoff(self._rate_limits)
         self._rate_limits += 1
