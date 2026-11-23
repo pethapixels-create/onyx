@@ -211,8 +211,14 @@ walks `/children` on a full pass: Graph documents that delta items have no
 the access of its parent folder, or of the library for a file at the root
 (`SharepointConnector._inherited_access`): one read for each parent in a
 listing run, kept in Redis under `sharepoint_container_access:<run id>:<hash>`
-for at most 10 minutes. A later run reads the parent again. When the read of
-the parent fails, the file gets a read of its own. Every other file, and every
+for at most 10 minutes. A later run reads the parent again. A revocation on
+the parent in those 10 minutes does not reach the files that conversion gives
+the kept access; the next listing run or permission sync reads it. When the
+read of the parent fails, the file gets a read of its own. The parent comes
+from the payload's `parent_path` (`parentReference.path`). Graph documents
+that delta items have no `parentReference.path`: a file with no parent path
+also gets a read of its own, so the saving needs a source that sends the path.
+How to find the parent without it is an open decision. Every other file, and every
 page, gets a read of its own, as before. The listing selects the `shared`
 facet (`LISTING_SELECT_FIELDS`); without it every file would look as if it
 inherits.
