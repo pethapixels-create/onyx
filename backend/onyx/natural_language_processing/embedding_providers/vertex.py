@@ -10,6 +10,10 @@ from onyx.natural_language_processing.embedding_providers.gemini import (
     format_gemini_embedding_text,
     is_gemini_embedding_2_model,
 )
+from onyx.natural_language_processing.embedding_providers.vertex_batching import (
+    is_token_limit_error,
+    vertex_batches,
+)
 from onyx.natural_language_processing.embedding_providers.vertex_credentials import (
     VERTEX_CREDENTIALS,
 )
@@ -24,7 +28,6 @@ from onyx.natural_language_processing.embedding_request_policy import (
 )
 from onyx.natural_language_processing.exceptions import EmbeddingRequestFailedError
 from onyx.utils.logger import setup_logger
-from shared_configs.configs import VERTEXAI_EMBEDDING_LOCAL_BATCH_SIZE
 from shared_configs.model_server_models import Embedding
 
 if TYPE_CHECKING:
@@ -63,45 +66,37 @@ async def embed_with_vertex(
         ),
     )
     config = _embed_config(resolved_model, embedding_type, reduced_dimension)
-    single_input = is_gemini_embedding_2_model(resolved_model)
-    scheduler_key = (
-        f"{resolved.project_id}/{resolved.location}/{resolved_model}"
-        if single_input
-        else None
-    )
+    scheduler_key = f"{resolved.project_id}/{resolved.location}/{resolved_model}"
 
-    async def embed_batch(batch_texts: list[str]) -> list[Embedding]:
+    async def send_batch(batch_texts: list[str]) -> list[Embedding]:
         request = partial(
             client.aio.models.embed_content,
             model=resolved_model,
             contents=_contents(batch_texts, resolved_model, embedding_type),
             config=config,
         )
-        if scheduler_key is None:
-            response = await policy.send_async(request)
-        else:
-            response = await VERTEX_SCHEDULER.send(scheduler_key, request, policy)
+        response = await VERTEX_SCHEDULER.send(scheduler_key, request, policy)
         return _embeddings_from(response)
 
-    batch_size = 1 if single_input else VERTEXAI_EMBEDDING_LOCAL_BATCH_SIZE
-    batches = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
+    async def embed_batch(batch_texts: list[str]) -> list[Embedding]:
+        try:
+            return await send_batch(batch_texts)
+        except Exception as e:
+            if len(batch_texts) == 1 or not is_token_limit_error(e):
+                raise
+        half = len(batch_texts) // 2
+        return await _embed_in_parallel(
+            [batch_texts[:half], batch_texts[half:]], embed_batch
+        )
+
+    batches = vertex_batches(texts, resolved_model)
     logger.debug(
-        "VertexAI embedding: processing %s texts in %s batches (batch_size=%s)",
+        "VertexAI embedding: processing %s texts in %s batches",
         len(texts),
         len(batches),
-        batch_size,
     )
-
     try:
-        if single_input:
-            embeddings = await _embed_in_parallel(batches, embed_batch)
-        else:
-            # Parallel multi-input batches caused docprocessing OOMs (#6980).
-            embeddings = await _embed_in_sequence(batches, embed_batch)
-        logger.debug(
-            "VertexAI embedding completed: %s embeddings generated", len(embeddings)
-        )
-        return embeddings
+        return await _embed_in_parallel(batches, embed_batch)
     except Exception as e:
         if _resending_does_not_help(e):
             raise EmbeddingRequestFailedError(f"{type(e).__name__}: {e}") from e
@@ -147,25 +142,6 @@ def _error_to_raise(errors: Sequence[BaseException]) -> BaseException:
             if isinstance(error, ends_the_call):
                 return error
     return errors[0]
-
-
-async def _embed_in_sequence(
-    batches: list[list[str]],
-    embed_batch: Callable[[list[str]], Coroutine[None, None, list[Embedding]]],
-) -> list[Embedding]:
-    embeddings: list[Embedding] = []
-    for batch_idx, batch in enumerate(batches):
-        embeddings.extend(await embed_batch(batch))
-
-        # Log progress for large batches to track memory usage patterns
-        if batch_idx % 10 == 0 and batch_idx > 0:
-            logger.debug(
-                "VertexAI embedding progress: batch %s/%s, total_embeddings=%s",
-                batch_idx,
-                len(batches),
-                len(embeddings),
-            )
-    return embeddings
 
 
 def _embed_config(
