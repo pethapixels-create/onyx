@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import Callable
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 from google.auth.credentials import Credentials
 from google.genai import errors as genai_errors
@@ -10,9 +11,16 @@ from google.genai import types as genai_types
 from onyx.connectors.models import ConnectorStopSignal
 from onyx.natural_language_processing.embedding_auth import build_embedding_auth
 from onyx.natural_language_processing.embedding_providers import vertex_scheduler
+from onyx.natural_language_processing.embedding_providers.vertex import (
+    _error_to_raise,
+)
 from onyx.natural_language_processing.embedding_providers.vertex_scheduler import (
     VertexRequestScheduler,
     VertexRetrySettings,
+    is_transient_vertex_error,
+)
+from onyx.natural_language_processing.embedding_rate_limit import (
+    EmbeddingWaitTimeoutError,
 )
 from onyx.natural_language_processing.embedding_request_policy import (
     EmbeddingRequestPolicy,
@@ -280,6 +288,43 @@ def test_embed_call_raises_the_request_error_not_a_group() -> None:
     client.aio.aclose = AsyncMock()
     with pytest.raises(ConnectorStopSignal):
         _embed(client, ["a", "b", "c"])
+
+
+def test_timeouts_are_not_transient() -> None:
+    assert is_transient_vertex_error(aiohttp.ClientConnectionError())
+    assert not is_transient_vertex_error(aiohttp.ServerTimeoutError())
+    assert not is_transient_vertex_error(aiohttp.ConnectionTimeoutError())
+
+
+def test_requests_have_a_timeout() -> None:
+    response = MagicMock()
+    response.embeddings = [MagicMock(values=[0.1])]
+    client = MagicMock()
+    client.aio.models.embed_content = AsyncMock(return_value=response)
+    client.aio.aclose = AsyncMock()
+    with (
+        patch("google.auth.default", return_value=(MagicMock(spec=Credentials), "p")),
+        patch("google.genai.Client", return_value=client) as new_client,
+    ):
+        asyncio.run(
+            _cloud_embedding()._embed_vertex(
+                texts=["a"],
+                model="gemini-embedding-2",
+                embedding_type="RETRIEVAL_DOCUMENT",
+                reduced_dimension=None,
+            )
+        )
+    assert new_client.call_args.kwargs["http_options"].timeout == 60_000
+
+
+@pytest.mark.parametrize(
+    "ends_the_call",
+    [ConnectorStopSignal("stop"), EmbeddingWaitTimeoutError("waited")],
+)
+def test_an_error_that_ends_the_call_wins(ends_the_call: Exception) -> None:
+    errors = [RuntimeError("sibling"), ends_the_call]
+    assert _error_to_raise(errors) is ends_the_call
+    assert _error_to_raise([errors[0]]) is errors[0]
 
 
 def test_embeddings_keep_the_input_order() -> None:

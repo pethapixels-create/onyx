@@ -44,13 +44,16 @@ class VertexRetrySettings(BaseModel):
 
 
 def is_transient_vertex_error(error: BaseException) -> bool:
-    # Timeouts are not transient: each one already waited the full timeout.
     import aiohttp
     from google.genai import errors as genai_errors
 
     if isinstance(error, genai_errors.ServerError):
         return error.code in _TRANSIENT_STATUSES
-    return isinstance(error, aiohttp.ClientConnectionError)
+    # aiohttp's timeouts are connection errors too, but each one already
+    # waited the full timeout.
+    return isinstance(error, aiohttp.ClientConnectionError) and not isinstance(
+        error, TimeoutError
+    )
 
 
 class _SlotRetries:

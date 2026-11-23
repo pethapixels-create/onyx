@@ -1,8 +1,9 @@
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from functools import partial
 from typing import TYPE_CHECKING
 
+from onyx.connectors.models import ConnectorStopSignal
 from onyx.natural_language_processing.constants import DEFAULT_VERTEX_MODEL
 from onyx.natural_language_processing.embedding_auth import VertexEmbeddingAuth
 from onyx.natural_language_processing.embedding_providers.gemini import (
@@ -14,6 +15,9 @@ from onyx.natural_language_processing.embedding_providers.vertex_credentials imp
 )
 from onyx.natural_language_processing.embedding_providers.vertex_scheduler import (
     VERTEX_SCHEDULER,
+)
+from onyx.natural_language_processing.embedding_rate_limit import (
+    EmbeddingWaitTimeoutError,
 )
 from onyx.natural_language_processing.embedding_request_policy import (
     EmbeddingRequestPolicy,
@@ -29,6 +33,8 @@ if TYPE_CHECKING:
 logger = setup_logger()
 
 _CLIENT_CLOSE_TIMEOUT_SECONDS = 5.0
+# The SDK sets no timeout, and a hung request holds its scheduler slot.
+_REQUEST_TIMEOUT_SECONDS = 60.0
 
 
 async def embed_with_vertex(
@@ -41,6 +47,7 @@ async def embed_with_vertex(
     reduced_dimension: int | None,
 ) -> list[Embedding]:
     from google import genai
+    from google.genai import types as genai_types
 
     resolved_model = model or DEFAULT_VERTEX_MODEL
     # ADC discovery can contact the GKE metadata server.
@@ -50,6 +57,9 @@ async def embed_with_vertex(
         project=resolved.project_id,
         location=resolved.location,
         credentials=resolved.credentials,
+        http_options=genai_types.HttpOptions(
+            timeout=int(_REQUEST_TIMEOUT_SECONDS * 1000)
+        ),
     )
     config = _embed_config(resolved_model, embedding_type, reduced_dimension)
     single_input = is_gemini_embedding_2_model(resolved_model)
@@ -104,8 +114,18 @@ async def _embed_in_parallel(
             tasks = [group.create_task(embed_batch(batch)) for batch in batches]
     except ExceptionGroup as errors:
         # Callers match on the request's own error type.
-        raise errors.exceptions[0] from None
+        raise _error_to_raise(errors.exceptions) from None
     return [embedding for task in tasks for embedding in task.result()]
+
+
+def _error_to_raise(errors: Sequence[BaseException]) -> BaseException:
+    # A stop or an exhausted wait ends the whole call, so it wins over
+    # an error that a sibling request got at the same time.
+    for ends_the_call in (ConnectorStopSignal, EmbeddingWaitTimeoutError):
+        for error in errors:
+            if isinstance(error, ends_the_call):
+                return error
+    return errors[0]
 
 
 async def _embed_in_sequence(

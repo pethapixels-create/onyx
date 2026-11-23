@@ -26,14 +26,15 @@ def test_limit_holds_across_threads_and_loops() -> None:
     for thread in threads:
         thread.start()
 
-    for _ in range(3):
-        assert acquired.acquire(timeout=10)
-    assert semaphore.in_flight == 3
-    assert not acquired.acquire(timeout=0.2)
-
-    release_all.set()
-    for thread in threads:
-        thread.join(timeout=10)
+    try:
+        for _ in range(3):
+            assert acquired.acquire(timeout=10)
+        assert semaphore.in_flight == 3
+        assert not acquired.acquire(timeout=0.2)
+    finally:
+        release_all.set()
+        for thread in threads:
+            thread.join(timeout=10)
     assert semaphore.in_flight == 0
 
 
