@@ -476,8 +476,9 @@ func (s *Store) checkVMTree(dir string) error {
 	return nil
 }
 
-// mkdirVM makes dir and its missing parents. It checks the deepest existing
-// parent first, so a link into a denied path gets no new directories.
+// mkdirVM makes dir and its missing parents, each owned by the configured
+// owner. It checks the deepest existing parent first, so a link into a denied
+// path gets no new directories.
 func (s *Store) mkdirVM(dir string) error {
 	existing := dir
 	for existing != "/" {
@@ -490,10 +491,19 @@ func (s *Store) mkdirVM(dir string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.checkVMPath(path.Join(real, strings.TrimPrefix(dir, existing))); err != nil {
+	missing := strings.TrimPrefix(strings.TrimPrefix(dir, existing), "/")
+	if err := s.checkVMPath(path.Join(real, missing)); err != nil {
 		return err
 	}
-	return fsErr(os.MkdirAll(dir, 0o755))
+	if missing == "" {
+		return nil
+	}
+	root, err := os.OpenRoot(real)
+	if err != nil {
+		return fsErr(err)
+	}
+	defer func() { _ = root.Close() }()
+	return s.mkdirAll(root, missing)
 }
 
 // onyxRel returns the path of abs in OnyxRoot ("." for OnyxRoot itself),

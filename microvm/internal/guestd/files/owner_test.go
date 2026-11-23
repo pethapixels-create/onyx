@@ -116,6 +116,27 @@ func TestOnyxWriteGivesTheRootAndNewDirectoriesToTheOwner(t *testing.T) {
 	}
 }
 
+func TestNoSessionWriteGivesNewDirectoriesToTheOwner(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(Config{SessionsRoot: filepath.Join(dir, "sessions"), Owner: &Owner{UID: 1000, GID: 1001}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := &chownLog{}
+	log.use(s)
+	spec := WriteSpec{Path: dir + "/skills/pptx/scripts/a.py", Size: 1, Overwrite: true, MakeParents: true}
+	if _, _, err := s.Write(context.Background(), "", spec, strings.NewReader("x")); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"skills", "skills/pptx", "skills/pptx/scripts", writePrefix + "*"}
+	if got := log.got(); !slices.Equal(got, want) {
+		t.Fatalf("chown %v, want %v", got, want)
+	}
+}
+
 func TestUploadGivesTheFileAndItsDirectoryToTheOwner(t *testing.T) {
 	s, _, log := ownedStore(t)
 	if _, _, err := s.Upload(context.Background(), sid, UploadSpec{FileName: "r.pdf", Size: 2}, strings.NewReader("pd")); err != nil {
