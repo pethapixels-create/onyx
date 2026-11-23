@@ -239,13 +239,21 @@ exec_command / write_stdin / apply_patch | edit + write / publish_files (no tool
                                         (build/db/sandbox.py:get_or_create_sandbox); before
                                         each call: HarnessSandbox.begin_turn (an error is
                                         logged, the call still runs)
-  SandboxTurn._sync_skills              before each call (calls wait on one lock): the turn
-                                        reads the available chat built-ins once
-                                        (skills/push.py:build_chat_built_ins_bundle; the
-                                        zip is built once per process for each set), then
-                                        HarnessSandbox.sync_skills shows them at /mnt/skills
-                                        and skips a VM instance that has them (an error is
-                                        logged; the next call tries again)
+  SandboxTurn._install_skills          before each call (calls wait on one lock): the
+                                        skills in want_skills (built-in or custom) resolve
+                                        to the version the user runs, once and again after
+                                        each new read; HarnessSandbox.install_skills copies
+                                        each one that this VM instance lacks to
+                                        /home/sandbox/.agents/skills/<name> (an error is
+                                        logged; the next call tries again). A built-in's
+                                        version key is the SHA-256 of its files
+                                        (skills/push.py:build_chat_built_in_skill_files)
+  ChatAgent._want_used_skills           before each tool call (before_tool_call, also a
+                                        call on a resume or in a program): the skills_read
+                                        calls and <skill> pick messages in the call's
+                                        context window go to SandboxTurn.want_skills
+                                        (skills/chat.py:used_skill_names), so a resumed or
+                                        woken turn copies them again
   ExecCommandTool / WriteStdinTool      HarnessSandbox.exec_command / write_stdin (each
                                         command gets AGENT_BROWSER_SESSION=<chat session>, so
                                         chats in one VM keep separate browsers); each

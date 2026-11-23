@@ -33,7 +33,14 @@ Exec contract (`exec_command` / `write_stdin`):
 
 import abc
 import posixpath
-from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
+from collections.abc import (
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from typing import IO
 from uuid import UUID
 
@@ -41,9 +48,9 @@ from onyx.microvm.models import FileListing
 from onyx.server.features.build.sandbox.models import (
     ExecCommandResult,
     ExecEvent,
+    FileSet,
     HarnessSandboxRef,
     SandboxPathInfo,
-    SkillsBundle,
     session_workspace,
 )
 
@@ -219,9 +226,15 @@ class HarnessSandbox(abc.ABC):
         initialized. Every other call does this first."""
 
     @abc.abstractmethod
-    def sync_skills(self, ref: HarnessSandboxRef, bundle: SkillsBundle) -> None:
-        """Show the bundle's files read-only at CHAT_SKILLS_MOUNT_PATH. Skips
-        the transfer when this VM instance already shows the same bundle."""
+    def install_skills(
+        self,
+        ref: HarnessSandboxRef,
+        versions: Mapping[str, str],
+        load: Callable[[str], FileSet | None],
+    ) -> None:
+        """Copy each skill (name to version key) into CHAT_SKILLS_PATH from
+        `load(name)`, skipping ones this VM instance already has. Logs
+        failures instead of raising."""
 
     @abc.abstractmethod
     def exec_command(

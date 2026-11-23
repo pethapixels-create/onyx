@@ -266,14 +266,16 @@ the stored token on each request, so a new token takes effect at once.
 `backend/onyx/microvm/` is the api_server side of the micro-VM runtime:
 - `backend/onyx/microvm/agent_client.py`: a typed mTLS client for the host
   agent, with session saves (capture, upload, discard, restore) and the
-  managed drive (put, swap). Chat's built-ins use the skills drive:
-  `FirecrackerHarnessSandbox.sync_skills` takes a `SkillsBundle` (a zip
-  with fixed entry times, so the same files give the same image ID), and,
-  under the per-sandbox lock
-  `sandbox_fc:skills_sync:<sandbox>`, puts and swaps the image only when
-  the `sandbox_fc:skills_image:<sandbox>` cache record names another VM
-  instance `(attempt, generation)` or another image. A woken or replaced VM is a
-  new instance, so its first chat turn pushes again. Stubs in `backend/onyx/microvm/generated/`; the
+  managed drive (put, swap). Chat does not use the managed drive for skills:
+  `FirecrackerHarnessSandbox.install_skills` copies each skill, built-in or
+  custom, into `/home/sandbox/.agents/skills/<name>/` under the per-sandbox
+  lock `sandbox_fc:skills_install:<sandbox>`. It deletes the folder, then
+  writes each file with the daemon's `write_file`. New folders belong to the
+  sandbox user, so the agent can change the copy. A copy that fails partway
+  leaves a partial folder and no version record, so the next sandbox call
+  copies the skill again. No command runs in the VM. The
+  `sandbox_fc:installed_skills:<sandbox>` record (name to version key, per
+  instance) skips a skill that the instance already has. Stubs in `backend/onyx/microvm/generated/`; the
   `microvm-python-stubs` pre-commit hook fails when they differ from
   `microvm/proto` (`regenerate.sh --check`).
 - `backend/onyx/microvm/daemon_client.py`: the guest daemon client, through

@@ -176,12 +176,16 @@
   accepted, at the version the user ran. A SKILL.md over 8,000 bytes is cut
   there, with a note that tells the model to continue with `skills_read`. History keeps that text, so a later edit, a deletion or lost access
   does not change what earlier turns see. A skill that cannot be read when
-  the message is accepted is not applied. A chat built-in's SKILL.md
-  starts with a `Skill files:` line that names its folder in the chat VM
-  (`/mnt/skills/<name>/`, read-only and noexec), where the model reads its
-  other files and runs its scripts through their interpreter with the
-  sandbox tools ([[craft-sandboxes]]). Chat cannot open the other files of a
-  custom skill or run its scripts. App built-ins, company-search,
+  the message is accepted is not applied. In a turn with the sandbox tools,
+  a skill's SKILL.md (from `skills_read` or a pick) starts with a
+  `Skill files: /home/sandbox/.agents/skills/<name>/` line. A chat
+  built-in's SKILL.md always has it. The skill's files, built-in or custom,
+  copy there, writable by the agent, before the next sandbox call after the
+  model reads it or a sent message picks it (`SandboxTurn.want_skills`). An
+  agent's changes stay until a new version or a new VM instance replaces the
+  copy. A new `skills_read` of the skill in the same turn takes its current
+  version. Without the sandbox tools, chat cannot open a custom skill's other
+  files. App built-ins, company-search,
   image-generation and craft-documentation stay out of chat.
   A built-in is a built-in plugin in code (`BuiltInSkillDefinition.skills`):
   one skill with SKILL.md at its root, or one skill per
@@ -681,7 +685,10 @@ the app from the same rule
     `skills/built_in.py:_REGISTRY`, so the rows otherwise stay.
 15. `skill-dir-placeholder` **Skill paths resolve to the sandbox folder.**
     `skills/push.py:_resolve_skill_dir` replaces each `${CLAUDE_SKILL_DIR}` in
-    a skill's root SKILL.md with `/workspace/managed/skills/<name>`. Only the
+    a skill's root SKILL.md with `<root>/<name>`: `/workspace/managed/skills`
+    for Craft, `/home/sandbox/.agents/skills` for a chat VM copy. In a turn
+    with the sandbox tools, `skills/content.py:read_chat_skills_md` resolves
+    it to the same chat folder in the text the model reads. Only the
     sent bytes change. The stored bundle, its SHA-256 and other files keep the
     placeholder. A resolved SKILL.md over the per-file limit skips that whole
     Skill with a warning. The resolved bytes count in the run-time total

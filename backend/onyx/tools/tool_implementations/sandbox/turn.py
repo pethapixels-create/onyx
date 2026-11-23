@@ -1,13 +1,17 @@
 """The sandbox that the sandbox tools of one chat session share during a run."""
 
+import hashlib
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from uuid import UUID
 
 from onyx.db.engine.sql_engine import get_session_with_tenant
+from onyx.db.models import User
 from onyx.db.sandbox import get_or_create_sandbox
+from onyx.db.skill import list_chat_skills
 from onyx.server.features.build.sandbox.harness_base import HarnessSandbox
-from onyx.server.features.build.sandbox.models import HarnessSandboxRef, SkillsBundle
+from onyx.server.features.build.sandbox.models import FileSet, HarnessSandboxRef
+from onyx.skills.models import ChatSkill
 from onyx.tools.tool_implementations.sandbox.file_copies import TurnFileCopies
 from onyx.tools.tool_implementations.sandbox.models import VmChatFile
 from onyx.utils.logger import setup_logger
@@ -39,22 +43,37 @@ class SandboxTurn:
         self,
         *,
         tenant_id: str,
-        user_id: UUID,
+        user: User,
         chat_session_id: UUID,
         vm_chat_files: Sequence[VmChatFile],
         copy_vm_chat_files: bool,
     ) -> None:
         self._tenant_id = tenant_id
-        self._user_id = user_id
+        self._user = user
         self._chat_session_id = chat_session_id
         self.vm_chat_files = vm_chat_files
         self._copy_vm_chat_files = copy_vm_chat_files
         self._lock = threading.Lock()
         self._ref: HarnessSandboxRef | None = None
         self._skills_lock = threading.Lock()
-        self._skills_loaded = False
-        self._skills_bundle: SkillsBundle | None = None
         self.file_copies: TurnFileCopies | None = None
+        self._reads: dict[str, int] = {}
+        self._wanted: set[str] = set()
+        self._resolved: set[str] = set()
+        self._skills: dict[str, ChatSkill] = {}
+        self._skill_files: dict[str, FileSet] = {}
+
+    def want_skills(self, reads: Mapping[str, int]) -> None:
+        """Copy these skills (name to read count) before the next call. A
+        higher count re-resolves the skill's version."""
+        with self._lock:
+            self._resolved -= {
+                name
+                for name, count in reads.items()
+                if count > self._reads.get(name, 0)
+            }
+            self._reads = dict(reads)
+            self._wanted.update(reads)
 
     @property
     def sandbox(self) -> HarnessSandbox:
@@ -74,7 +93,7 @@ class SandboxTurn:
         if ref is None:
             # Outside the lock: concurrent first calls get the same row.
             with get_session_with_tenant(tenant_id=self._tenant_id) as db_session:
-                sandbox_id = get_or_create_sandbox(db_session, self._user_id).id
+                sandbox_id = get_or_create_sandbox(db_session, self._user.id).id
             with self._lock:
                 if self._ref is None:
                     self._ref = HarnessSandboxRef(
@@ -104,31 +123,75 @@ class SandboxTurn:
                     ref.sandbox_id,
                     ref.session_id,
                 )
-        self._sync_skills(ref)
-        return ref
-
-    def _sync_skills(self, ref: HarnessSandboxRef) -> None:
-        # Deferred: the skills push stack loads only when a tool runs.
-        from onyx.skills.push import build_chat_built_ins_bundle
-
         with self._skills_lock:
             try:
-                if not self._skills_loaded:
-                    with get_session_with_tenant(
-                        tenant_id=self._tenant_id
-                    ) as db_session:
-                        self._skills_bundle = build_chat_built_ins_bundle(db_session)
-                    self._skills_loaded = True
-                # Every call: a VM that replaced a stopped one mid-turn needs
-                # the push too, and an unchanged instance is skipped.
-                if self._skills_bundle is not None:
-                    self.sandbox.sync_skills(ref, self._skills_bundle)
+                self._install_skills(ref)
             except Exception:
                 logger.exception(
-                    "sandbox_skills_sync_failed sandbox=%s session=%s",
+                    "sandbox_skills_install_failed sandbox=%s session=%s",
                     ref.sandbox_id,
                     ref.session_id,
                 )
+        return ref
+
+    def _install_skills(self, ref: HarnessSandboxRef) -> None:
+        from onyx.skills.push import (
+            build_chat_built_in_skill_files,
+            build_chat_custom_skill_files,
+        )
+
+        with self._lock:
+            unresolved = self._wanted - self._resolved
+            reads = dict(self._reads)
+        if unresolved:
+            with get_session_with_tenant(tenant_id=self._tenant_id) as db_session:
+                skills = list_chat_skills(db_session, self._user, built_ins=True)
+            for name in unresolved:
+                self._skills.pop(name, None)
+                self._skill_files.pop(name, None)
+                skill = next((s for s in skills if s.name == name), None)
+                if skill is not None:
+                    self._skills[name] = skill
+            with self._lock:
+                self._resolved |= {
+                    name
+                    for name in unresolved
+                    if self._reads.get(name, 0) == reads.get(name, 0)
+                }
+        if not self._skills:
+            return
+
+        def load(name: str) -> FileSet | None:
+            files = self._skill_files.get(name)
+            if files is None:
+                skill = self._skills[name]
+                if skill.built_in_skill_id is not None:
+                    files = build_chat_built_in_skill_files(skill)
+                else:
+                    with get_session_with_tenant(
+                        tenant_id=self._tenant_id
+                    ) as db_session:
+                        files = build_chat_custom_skill_files(
+                            skill, self._user, db_session
+                        )
+                if files is not None:
+                    self._skill_files[name] = files
+            return files
+
+        def version(name: str, skill: ChatSkill) -> str:
+            if skill.built_in_skill_id is None:
+                return f"{skill.version_id}:{skill.path}"
+            digest = hashlib.sha256()
+            for path, data in sorted((load(name) or {}).items()):
+                digest.update(f"{path}\0{len(data)}\0".encode())
+                digest.update(data)
+            return digest.hexdigest()
+
+        self.sandbox.install_skills(
+            ref,
+            {name: version(name, skill) for name, skill in self._skills.items()},
+            load,
+        )
 
     def end(self) -> None:
         """End the turn if a call started one. Never raises."""

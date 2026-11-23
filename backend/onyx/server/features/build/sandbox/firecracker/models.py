@@ -33,9 +33,11 @@ class SessionInstanceTable(BaseModel):
     sessions: dict[str, tuple[int, int]] = {}
 
 
-class SkillsImage(BaseModel):
-    instance: tuple[int, int]
-    image_id: str
+class InstalledSkills(BaseModel):
+    """The skills copied to one VM instance: name → version key."""
+
+    instance: tuple[int, int] = (0, 0)
+    versions: dict[str, str] = {}
 
 
 class SessionSave(BaseModel):

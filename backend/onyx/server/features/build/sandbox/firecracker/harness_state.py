@@ -38,9 +38,9 @@ from onyx.server.features.build.sandbox.firecracker.models import (
     ExecSessionTable,
     HarnessActivity,
     IdSet,
+    InstalledSkills,
     SessionInstanceTable,
     SessionSave,
-    SkillsImage,
 )
 
 EXEC_SESSIONS_PREFIX = "sandbox_fc:exec_sessions:"
@@ -48,7 +48,7 @@ ACTIVITY_PREFIX = "sandbox_fc:harness_activity:"
 SESSION_INSTANCES_PREFIX = "sandbox_fc:session_instances:"
 SESSION_SAVE_PREFIX = "sandbox_fc:session_save:"
 LAST_ATTEMPT_PREFIX = "sandbox_fc:last_attempt:"
-SKILLS_IMAGE_PREFIX = "sandbox_fc:skills_image:"
+INSTALLED_SKILLS_PREFIX = "sandbox_fc:installed_skills:"
 SAVED_SESSIONS_PREFIX = "sandbox_fc:saved_sessions:"
 WANTED_PREFIX = "sandbox_fc:wanted:"
 PURGED_SESSION_PREFIX = "sandbox_fc:purged_session:"
@@ -65,7 +65,7 @@ SANDBOX_STATE_PREFIXES = (
     ACTIVITY_PREFIX,
     SESSION_INSTANCES_PREFIX,
     LAST_ATTEMPT_PREFIX,
-    SKILLS_IMAGE_PREFIX,
+    INSTALLED_SKILLS_PREFIX,
     WANTED_PREFIX,
 )
 _CAS_TRIES = 16
@@ -105,13 +105,31 @@ def _update(
     raise StateContentionError(key)
 
 
-def get_skills_image(cache: CacheBackend, sandbox_id: UUID) -> SkillsImage | None:
-    raw = cache.get(SKILLS_IMAGE_PREFIX + str(sandbox_id))
-    return None if raw is None else SkillsImage.model_validate_json(raw)
+def installed_skills(
+    cache: CacheBackend, sandbox_id: UUID, instance: tuple[int, int]
+) -> dict[str, str]:
+    record = _read(cache, INSTALLED_SKILLS_PREFIX + str(sandbox_id), InstalledSkills)
+    return record.versions if record.instance == instance else {}
 
 
-def set_skills_image(cache: CacheBackend, sandbox_id: UUID, image: SkillsImage) -> None:
-    cache.set(SKILLS_IMAGE_PREFIX + str(sandbox_id), image.model_dump_json())
+def set_installed_skill(
+    cache: CacheBackend,
+    sandbox_id: UUID,
+    instance: tuple[int, int],
+    name: str,
+    version: str | None,
+) -> None:
+    """Record the skill's copied version on the instance; None removes it."""
+
+    def change(record: InstalledSkills) -> InstalledSkills:
+        versions = dict(record.versions) if record.instance == instance else {}
+        if version is None:
+            versions.pop(name, None)
+        else:
+            versions[name] = version
+        return InstalledSkills(instance=instance, versions=versions)
+
+    _update(cache, INSTALLED_SKILLS_PREFIX + str(sandbox_id), InstalledSkills, change)
 
 
 def get_exec_session(
