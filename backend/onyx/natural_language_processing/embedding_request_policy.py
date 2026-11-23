@@ -81,13 +81,17 @@ class EmbeddingRequestPolicy(BaseModel):
         slot: Callable[[], AbstractAsyncContextManager[object]] | None = None,
     ) -> _T:
         """Sends one provider request under this policy. The rate limit and
-        provider throttling share one wait time limit per request. Each
-        attempt runs inside `slot`, entered after the rate limit; the wait
-        for the slot does not count against the limit."""
+        provider throttling share one wait time limit per request.
+
+        Each attempt runs inside `slot`. The attempt takes its rate limit
+        permit in the slot, so the permit is used at once, and waits for the
+        rate limit and throttling outside it. The wait for the slot does not
+        count against the time limit."""
         started_at = time.monotonic()
         throttle_attempt = 0
+        rate_limit_attempt = 0
         while True:
-            if self.rate_limiter is not None:
+            if slot is None and self.rate_limiter is not None:
                 await self.rate_limiter.acquire_async(
                     self.should_stop, started_at, self._add_rate_limit_wait
                 )
@@ -97,7 +101,11 @@ class EmbeddingRequestPolicy(BaseModel):
                 slot_wait_started = time.monotonic()
                 async with slot():
                     started_at += time.monotonic() - slot_wait_started
-                    return await request()
+                    if (
+                        self.rate_limiter is None
+                        or self.rate_limiter.try_acquire() == 0
+                    ):
+                        return await request()
             except Exception as e:
                 if not (self.block_on_provider_rate_limit and is_rate_limit_error(e)):
                     raise
@@ -110,6 +118,21 @@ class EmbeddingRequestPolicy(BaseModel):
                 finally:
                     self._add_provider_throttle_wait(time.monotonic() - start)
                 throttle_attempt += 1
+                continue
+            await self._wait_for_full_rate_limit(rate_limit_attempt, started_at)
+            rate_limit_attempt += 1
+
+    async def _wait_for_full_rate_limit(self, attempt: int, started_at: float) -> None:
+        if self.rate_limiter is None:
+            return
+        start = time.monotonic()
+        try:
+            for sleep_seconds in self.rate_limiter.full_window_sleeps(
+                attempt, started_at, self.should_stop
+            ):
+                await asyncio.sleep(sleep_seconds)
+        finally:
+            self._add_rate_limit_wait(time.monotonic() - start)
 
     def _throttle_sleeps(self, attempt: int, started_at: float) -> Iterator[float]:
         return wait_sleeps(

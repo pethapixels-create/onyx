@@ -192,15 +192,18 @@ def test_rate_limited_request_backs_off_inside_its_slot() -> None:
     assert scheduler.process_limit.in_flight == 0
 
 
-def test_rate_limit_waits_hold_no_slot() -> None:
+def test_rate_limit_permits_are_taken_in_the_slot_and_waits_outside() -> None:
     scheduler = _scheduler_without_backoff(rate_limit_retry_budget_seconds=0)
+    in_flight_at_permit: list[int] = []
     in_flight_while_waiting: list[int] = []
     calls = 0
 
-    async def wait_for_rate_limit(*_args: object) -> None:
-        in_flight_while_waiting.append(scheduler.process_limit.in_flight)
+    def try_acquire() -> float:
+        in_flight_at_permit.append(scheduler.process_limit.in_flight)
+        # The window is full on the first try.
+        return 5.0 if len(in_flight_at_permit) == 1 else 0.0
 
-    def throttle_sleeps(*_args: object) -> Iterator[float]:
+    def sleeps(*_args: object) -> Iterator[float]:
         in_flight_while_waiting.append(scheduler.process_limit.in_flight)
         yield 0
 
@@ -212,17 +215,20 @@ def test_rate_limit_waits_hold_no_slot() -> None:
         return "ok"
 
     rate_limiter = MagicMock(spec=EmbeddingRateLimiter)
-    rate_limiter.acquire_async = AsyncMock(side_effect=wait_for_rate_limit)
+    rate_limiter.try_acquire = MagicMock(side_effect=try_acquire)
+    rate_limiter.full_window_sleeps = MagicMock(side_effect=sleeps)
     policy = EmbeddingRequestPolicy(
         retry_backoff=EmbeddingRetryBackoff(scale_seconds=0, max_seconds=0),
         retry_tries=1,
         rate_limiter=rate_limiter,
         block_on_provider_rate_limit=True,
     )
-    with patch(f"{_POLICY_MODULE}.wait_sleeps", throttle_sleeps):
+    with patch(f"{_POLICY_MODULE}.wait_sleeps", sleeps):
         assert asyncio.run(scheduler.send(_KEY, request, policy)) == "ok"
-    # Rate limit, provider throttling, then the rate limit again.
-    assert in_flight_while_waiting == [0, 0, 0]
+    # Full window, admitted then throttled by the provider, admitted.
+    assert in_flight_at_permit == [1, 1, 1]
+    assert in_flight_while_waiting == [0, 0]
+    rate_limiter.acquire_async.assert_not_called()
 
 
 def test_slot_wait_does_not_count_against_the_wait_limit() -> None:
@@ -409,7 +415,7 @@ def test_transient_errors_are_not_resent_past_a_rate_limiter() -> None:
         raise _vertex_503()
 
     rate_limiter = MagicMock(spec=EmbeddingRateLimiter)
-    rate_limiter.acquire_async = AsyncMock()
+    rate_limiter.try_acquire = MagicMock(return_value=0.0)
     policy = EmbeddingRequestPolicy(
         retry_backoff=EmbeddingRetryBackoff(scale_seconds=0, max_seconds=0),
         retry_tries=1,
